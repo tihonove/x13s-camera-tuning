@@ -1,0 +1,119 @@
+From 3be1d2e90c1842e28af485bef984a91d491528d9 Mon Sep 17 00:00:00 2001
+From: Eugene Tihonov <2770182+tihonove@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 17:07:26 +0200
+Subject: [PATCH] libcamera: software_isp: Leave saturated pixels out of AWB
+ sums
+
+The green channel clips first, so summing clipped highlights under-reports
+green and grey-world AWB drifts to green outdoors. Skip 2x2 blocks with any
+channel >= 250/255 from the colour sums (the Y histogram is unchanged) and
+count the pixels that went in, so that Awb subtracts the black level for the
+right number of pixels.
+
+The IPA module and libcamera.so must be built together: SwIspStats grows a
+trailing sumCount member.
+---
+ .../internal/software_isp/swisp_stats.h       |  8 ++++++
+ src/ipa/simple/algorithms/awb.cpp             |  8 ++++--
+ src/libcamera/software_isp/swstats_cpu.cpp    | 25 +++++++++++++++----
+ 3 files changed, 34 insertions(+), 7 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index d9d0d9be8..c3d4b0b6d 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -43,6 +43,14 @@ struct SwIspStats {
+ 	 * \brief A histogram of luminance values of all the sampled pixels
+ 	 */
+ 	Histogram yHistogram;
++	/**
++	 * \brief Number of sampled pixels included in sum_
++	 *
++	 * Pixels with a saturated colour channel are left out of sum_ (but not
++	 * out of yHistogram), so this may be less than the histogram total.
++	 * Kept last so that the layout of the preceding members is unchanged.
++	 */
++	uint64_t sumCount;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/ipa/simple/algorithms/awb.cpp b/src/ipa/simple/algorithms/awb.cpp
+index 6fdaacaba..b656723d8 100644
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -75,8 +75,12 @@ void Awb::process(IPAContext &context,
+ 	 * would be off if they were computed from the whole brightness range
+ 	 * rather than from the sensor range.
+ 	 */
+-	const uint64_t nPixels = std::accumulate(
+-		histogram.begin(), histogram.end(), uint64_t(0));
++	/* Saturated pixels are not in the sums, see SwIspStats::sumCount. */
++	const uint64_t nPixels = stats->sumCount;
++	if (nPixels < std::accumulate(histogram.begin(), histogram.end(), uint64_t(0)) / 100) {
++		LOG(IPASoftAwb, Debug) << "Too few unsaturated pixels, keeping gains";
++		return;
++	}
+ 	const uint64_t offset = blackLevel * nPixels;
+ 	const uint64_t minValid = 1;
+ 	/*
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 5c3011a7f..6cdc0054b 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -166,18 +166,31 @@ static constexpr unsigned int kRedYMul = 77; /* 0.299 * 256 */
+ static constexpr unsigned int kGreenYMul = 150; /* 0.587 * 256 */
+ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 
++/*
++ * Pixels with any channel at or above this level (in 8-bit units) are left out
++ * of the colour sums. The green channel clips first, so counting clipped
++ * highlights under-reports green and grey-world AWB drifts to green.
++ */
++static constexpr unsigned int kSaturatedLevel = 250;
++
+ #define SWSTATS_START_LINE_STATS(pixel_t) \
+ 	pixel_t r, g, g2, b;              \
+ 	uint64_t yVal;                    \
+                                           \
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
++	uint64_t sumB = 0;                \
++	uint64_t sumCount = 0;
+ 
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+-	sumR += r;                         \
+-	sumG += g;                         \
+-	sumB += b;                         \
++	if (r < kSaturatedLevel * (div) &&  \
++	    g < kSaturatedLevel * (div) &&  \
++	    b < kSaturatedLevel * (div)) {  \
++		sumR += r;                  \
++		sumG += g;                  \
++		sumB += b;                  \
++		sumCount++;                 \
++	}                                   \
+                                            \
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+@@ -187,7 +200,8 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ #define SWSTATS_FINISH_LINE_STATS() \
+ 	stats_.sum_.r() += sumR;    \
+ 	stats_.sum_.g() += sumG;    \
+-	stats_.sum_.b() += sumB;
++	stats_.sum_.b() += sumB;    \
++	stats_.sumCount += sumCount;
+ 
+ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[])
+ {
+@@ -333,6 +347,7 @@ void SwStatsCpu::startFrame(uint32_t frame)
+ 		LOG(SwStatsCpu, Error) << "Calling startFrame() without setWindow()";
+ 
+ 	stats_.sum_ = RGB<uint64_t>({ 0, 0, 0 });
++	stats_.sumCount = 0;
+ 	stats_.yHistogram.fill(0);
+ }
+ 
+-- 
+2.53.0
+

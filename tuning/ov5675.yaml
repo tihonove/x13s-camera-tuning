@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: CC0-1.0
+# Soft ISP tuning for the ThinkPad X13s front camera (ov5675).
+# Based on /usr/share/libcamera/ipa/simple/uncalibrated.yaml (libcamera 0.7.0).
+# The Adjust and Agc keys below only work with the patched IPA module from this
+# repo (patches 0003 and 0006); stock libcamera ignores them.
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+  - Awb:
+  # One matrix for all colour temperatures. Solved in linear light (x^2.2 on
+  # both sides) from a ColorChecker chart shown on a phone screen (~D65),
+  # applied at strength 0.5 and warmed by 1.15:
+  #   diag(sqrt 1.15, 1, 1/sqrt 1.15) * (I + 0.5 (M - I))
+  # Full solution: ccm-linear.json. Rows sum to 1.0 before the warmth step.
+  - Ccm:
+      ccms:
+        - ct: 6500
+          ccm: [ 1.3831, -0.1304, -0.1803,
+                -0.0545,  1.1179, -0.0635,
+                -0.0404, -0.2997,  1.2727 ]
+  # Adjust runs after Ccm. contrast is the libcamera power curve (at gamma 2.2)
+  # closest to a gentle smoothstep S-curve. A punchier alternative:
+  # contrast 1.098 with gamma 2.38.
+  - Adjust:
+      contrast: 1.032
+      # gamma: 2.2
+  # Needs patch 0006. MSV is measured on the raw histogram (before AWB, CCM and
+  # gamma). The stock target of 2.5 blew out ~15% of the frame next to a window.
+  # highlightLevel is a fraction of the raw range above black, highlightMax is
+  # the share of pixels allowed above it.
+  - Agc:
+      target: 2.2
+      highlightLevel: 0.75
+      highlightMax: 0.04
+...

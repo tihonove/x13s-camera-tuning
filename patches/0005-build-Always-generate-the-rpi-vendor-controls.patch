@@ -1,0 +1,29 @@
+From dfcc0a099b361c0198be0e6a2e4f2ee81e8256a3 Mon Sep 17 00:00:00 2001
+From: Eugene Tihonov <2770182+tihonove@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 17:09:48 +0200
+Subject: [PATCH] build: Always generate the rpi vendor controls
+
+Our libcamera.so is built with the simple and uvcvideo pipelines only, but
+replaces the Ubuntu one for pipewire, where the Python bindings (linked
+against the full build) need controls::rpi::* symbols.
+---
+ include/libcamera/meson.build | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/include/libcamera/meson.build b/include/libcamera/meson.build
+index 30ea76f94..6a76b679e 100644
+--- a/include/libcamera/meson.build
++++ b/include/libcamera/meson.build
+@@ -57,7 +57,8 @@ foreach mode, entry : controls_map
+     files_list = []
+     input_files = []
+     foreach vendor, header : entry
+-        if vendor not in ['core', 'debug', 'draft']
++        # x13s-camera-gpu: rpi controls always, as in the Ubuntu build (pycamera links them)
++        if vendor not in ['core', 'debug', 'draft', 'rpi/vc4']
+             if vendor not in pipelines
+                 continue
+             endif
+-- 
+2.53.0
+

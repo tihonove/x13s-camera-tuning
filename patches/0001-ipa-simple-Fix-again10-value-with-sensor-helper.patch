@@ -1,0 +1,44 @@
+From f7b32d875d0ec92b10aebc03deeee37233f81458 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Barnab=C3=A1s=20P=C5=91cze?=
+ <barnabas.pocze@ideasonboard.com>
+Date: Fri, 6 Mar 2026 15:10:29 +0100
+Subject: [PATCH 1/2] ipa: simple: Fix `again10` value with sensor helper
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`CameraSensorHelper::gain(uint32_t)` maps a gain code to the actual floating
+point gain value. Calling it with `1.0` as the argument will simply get
+the real gain for gain code 1. This is most likely not what was intended.
+
+For example, in the case of the `ov2740` sensor, `againMin` is 1, but the
+calculated `again10` (1 / 128 ~ 0.078) ends up being < 1, meaning that the
+agc algorithm will never lower the exposure.
+
+Fix that by using the maximum of the minimum gain and 1 as `again10`.
+
+Fixes: 950ca85e8aa5 ("ipa: software_isp: AGC: Do not lower gain below 1.0")
+Signed-off-by: Barnabás Pőcze <barnabas.pocze@ideasonboard.com>
+Reviewed-by: Milan Zamazal <mzamazal@redhat.com>
+Reviewed-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
+(cherry picked from commit 02277d4c1a5ae7fee582f635936877435a12db64)
+---
+ src/ipa/simple/soft_simple.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index 6bef597c8..f2c216a84 100644
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -227,7 +227,7 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 	if (camHelper_) {
+ 		context_.configuration.agc.againMin = camHelper_->gain(againMin);
+ 		context_.configuration.agc.againMax = camHelper_->gain(againMax);
+-		context_.configuration.agc.again10 = camHelper_->gain(1.0);
++		context_.configuration.agc.again10 = std::max(context_.configuration.agc.againMin, 1.0);
+ 		context_.configuration.agc.againMinStep =
+ 			(context_.configuration.agc.againMax -
+ 			 context_.configuration.agc.againMin) /
+-- 
+2.53.0
+

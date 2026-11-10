@@ -1,0 +1,74 @@
+#!/bin/bash
+# Switch the X13s front camera between the patched soft ISP and stock libcamera.
+#
+#   ./camera-mode gpu      install out/ + tuning/ov5675.yaml to ~/.local/share and
+#                          point pipewire and wireplumber at them via drop-ins
+#   ./camera-mode stock    remove the drop-ins (back to system libcamera)
+#   ./camera-mode status
+#
+# The camera stream lives in the pipewire process (spa-libcamera); wireplumber
+# only enumerates cameras. Both need the same environment.
+# Restart your browser after switching: it keeps the old camera node.
+set -u
+ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+DEST=${XDG_DATA_HOME:-$HOME/.local/share}/x13s-camera-tuning
+UDIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+NAME=x13s-camera-tuning.conf
+DROPINS="$UDIR/pipewire.service.d/$NAME $UDIR/wireplumber.service.d/$NAME"
+
+restart_pw() {
+    systemctl --user daemon-reload
+    # filter-chain is bound to pipewire on some setups; restart it only if present.
+    local units="pipewire.service wireplumber.service"
+    systemctl --user is-active --quiet filter-chain.service && units="$units filter-chain.service"
+    systemctl --user restart $units
+    sleep 2
+}
+
+mode_now() {
+    [ -f "$UDIR/wireplumber.service.d/$NAME" ] && echo gpu || echo stock
+}
+
+case "${1:-status}" in
+  gpu)
+    ver=$(dpkg-query -W -f='${Version}' libcamera0.7 2>/dev/null)
+    for f in ipa_soft_simple.so lib/libcamera.so.0.7 lib/libcamera-base.so.0.7 BUILT_FOR; do
+        [ -f "$ROOT/out/$f" ] || { echo "missing out/$f, run ./build.sh first" >&2; exit 1; }
+    done
+    grep -q "^$ver " "$ROOT/out/BUILT_FOR" ||
+        { echo "out/ was built for $(cut -d' ' -f1 "$ROOT/out/BUILT_FOR"), system has libcamera0.7 $ver. Rebuild." >&2; exit 1; }
+    rm -rf "$DEST"; mkdir -p "$DEST"
+    cp -r "$ROOT/out/." "$DEST/"
+    cp "$ROOT/tuning/ov5675.yaml" "$DEST/"
+    for f in $DROPINS; do
+        mkdir -p "$(dirname "$f")"
+        cat > "$f" <<CONF
+# x13s-camera-tuning: patched libcamera soft ISP. Undo: camera-mode stock
+# (or delete this file, daemon-reload, restart pipewire and wireplumber).
+[Service]
+# The IPA module only works with the libcamera.so from the same build (patch 0004).
+Environment=LD_LIBRARY_PATH=$DEST/lib
+Environment=LIBCAMERA_IPA_MODULE_PATH=$DEST
+Environment=LIBCAMERA_SIMPLE_TUNING_FILE=$DEST/ov5675.yaml
+CONF
+    done
+    restart_pw
+    echo "mode: gpu. Restart your browser."
+    ;;
+  stock)
+    for f in $DROPINS; do rm -f "$f"; rmdir "$(dirname "$f")" 2>/dev/null; done
+    rm -rf "$DEST"
+    restart_pw
+    echo "mode: stock. Restart your browser."
+    ;;
+  status)
+    echo "mode: $(mode_now)"
+    pid=$(systemctl --user show -p MainPID --value pipewire.service)
+    if [ -n "$pid" ] && [ "$pid" != 0 ]; then
+        tuning=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^LIBCAMERA_SIMPLE_TUNING_FILE=//p')
+        echo "running pipewire uses tuning: ${tuning:-stock (uncalibrated.yaml)}"
+    fi
+    ;;
+  *)
+    echo "usage: $0 gpu|stock|status" >&2; exit 2 ;;
+esac

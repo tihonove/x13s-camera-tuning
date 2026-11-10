@@ -1,0 +1,137 @@
+From b6ed1d48118c901c87220bfdb9d2123d4cf2949d Mon Sep 17 00:00:00 2001
+From: Eugene Tihonov <2770182+tihonove@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 12:49:24 +0200
+Subject: [PATCH] ipa: simple: agc: Read MSV target and highlight limit from
+ tuning file
+
+Without the keys the behaviour is unchanged (target 2.5, no highlight
+limit). The MSV is measured on the raw histogram, before white balance,
+CCM and gamma, so the default target lands far too bright on a lit scene
+(office by a window: mean output Y 175, 15% of pixels clipped). The
+highlight limit steps the exposure down while too many pixels are above
+a luminance level, and holds it near the limit.
+---
+ src/ipa/simple/algorithms/agc.cpp | 51 ++++++++++++++++++++++++++++---
+ src/ipa/simple/algorithms/agc.h   |  9 +++++-
+ 2 files changed, 55 insertions(+), 5 deletions(-)
+
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index a13a75528..1c9a97fa3 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include <libcamera/base/log.h>
+ 
++#include "libcamera/internal/yaml_parser.h"
++
+ #include "control_ids.h"
+ 
+ namespace libcamera {
+@@ -61,16 +63,48 @@ static constexpr float kExpProportionalGain = 0.04;
+  */
+ static constexpr float kExpMaxStep = 0.15;
+ 
++/*
++ * Highlight protection: while more than highlightMax_ of the pixels have a
++ * luminance at or above highlightLevel_ (0..1 of the black-level-corrected
++ * range), the exposure goes down regardless of the MSV; while more than
++ * kHighlightHold of that limit is used, it is not raised. A highlightMax_
++ * of 1.0 (the default) disables it.
++ */
++static constexpr float kHighlightHold = 0.7;
++
+ Agc::Agc()
++	: target_(kExposureOptimal), highlightLevel_(1.0), highlightMax_(1.0)
+ {
+ }
+ 
+-void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
++int Agc::init([[maybe_unused]] IPAContext &context, const YamlObject &tuningData)
++{
++	/* Optional, without the keys the behaviour is unchanged. */
++	target_ = tuningData["target"].get<float>(kExposureOptimal);
++	highlightLevel_ = tuningData["highlightLevel"].get<float>(1.0);
++	highlightMax_ = tuningData["highlightMax"].get<float>(1.0);
++	LOG(IPASoftExposure, Debug)
++		<< "MSV target " << target_ << ", highlights at "
++		<< highlightLevel_ << " max " << highlightMax_;
++	return 0;
++}
++
++void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
++			 double exposureMSV, double highlights)
+ {
+ 	int32_t &exposure = frameContext.sensor.exposure;
+ 	double &again = frameContext.sensor.gain;
+ 
+-	double error = kExposureOptimal - exposureMSV;
++	double error = target_ - exposureMSV;
++
++	if (highlights > highlightMax_) {
++		/* Too much is clipped: step down, harder the further over. */
++		double over = std::min(highlights / highlightMax_ - 1.0, 4.0);
++		error = std::min(error, -(kExposureSatisfactory + 0.05 + over));
++	} else if (error > 0 && highlights > highlightMax_ * kHighlightHold) {
++		/* Close to the limit: hold instead of raising into it. */
++		error = 0;
++	}
+ 
+ 	if (std::abs(error) <= kExposureSatisfactory)
+ 		return;
+@@ -119,7 +153,7 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, dou
+ 	context.activeState.agc.again = again;
+ 
+ 	LOG(IPASoftExposure, Debug)
+-		<< "exposureMSV " << exposureMSV
++		<< "exposureMSV " << exposureMSV << " highlights " << highlights
+ 		<< " error " << error << " factor " << factor
+ 		<< " exp " << exposure << " again " << again;
+ }
+@@ -189,7 +223,16 @@ void Agc::process(IPAContext &context,
+ 	}
+ 
+ 	float exposureMSV = (denom == 0 ? 0 : static_cast<float>(num) / denom);
+-	updateExposure(context, frameContext, exposureMSV);
++
++	unsigned int hiFrom = blackLevelHistIdx +
++		std::min(static_cast<unsigned int>(highlightLevel_ * histogramSize),
++			 histogramSize - 1);
++	unsigned int hiCount = 0;
++	for (unsigned int i = hiFrom; i < SwIspStats::kYHistogramSize; i++)
++		hiCount += histogram[i];
++	double highlights = denom == 0 ? 0 : static_cast<double>(hiCount) / denom;
++
++	updateExposure(context, frameContext, exposureMSV, highlights);
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Agc, "Agc")
+diff --git a/src/ipa/simple/algorithms/agc.h b/src/ipa/simple/algorithms/agc.h
+index 112d9f5a1..7bbc9934a 100644
+--- a/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -19,13 +19,20 @@ public:
+ 	Agc();
+ 	~Agc() = default;
+ 
++	int init(IPAContext &context, const YamlObject &tuningData) override;
++
+ 	void process(IPAContext &context, const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+ 		     ControlList &metadata) override;
+ 
+ private:
+-	void updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV);
++	void updateExposure(IPAContext &context, IPAFrameContext &frameContext,
++			    double exposureMSV, double highlights);
++
++	float target_;
++	float highlightLevel_;
++	float highlightMax_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+-- 
+2.53.0
+
